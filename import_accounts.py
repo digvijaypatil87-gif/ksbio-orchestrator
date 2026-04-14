@@ -91,32 +91,83 @@ def parse_trial_balance_xml(filepath):
                             break
                 
                 if name and name != '1':
-                    # Determine account type based on name patterns
-                    account_type = "Cash"
-                    if any(x in name.upper() for x in ['BANK', 'CASH']):
-                        account_type = "Cash"
-                    elif any(x in name.upper() for x in ['SALES', 'REVENUE']):
-                        account_type = "Income"
-                    elif any(x in name.upper() for x in ['PURCHASE', 'EXPENSE']):
-                        account_type = "Expense"
-                    elif any(x in name.upper() for x in ['DEBTOR', 'CUSTOMER', 'RECEIVABLE']):
-                        account_type = "Receivable"
-                    elif any(x in name.upper() for x in ['CREDITOR', 'SUPPLIER', 'PAYABLE']):
-                        account_type = "Payable"
-                    elif any(x in name.upper() for x in ['STOCK', 'INVENTORY']):
-                        account_type = "Stock"
-                    else:
-                        account_type = "Cash"  # Default
-                    
                     accounts.append({
                         "account_name": name,
-                        "account_type": account_type,
-                        "parent_account": "",
-                        "root_type": account_type,
-                        "is_group": 0
+                        "cl_amount": cl_amount,
+                        "dr_amount": dr_amount,
+                        "cr_amount": cr_amount,
+                        "op_amount": op_amount
                     })
     
     return accounts
+
+def create_root_accounts(session):
+    """Create root accounts for the chart of accounts"""
+    root_accounts = [
+        {"account_name": "Bank Accounts", "account_type": "Bank", "root_type": "Asset", "is_group": 1, "company": "KSBio"},
+        {"account_name": "Cash Accounts", "account_type": "Cash", "root_type": "Asset", "is_group": 1, "company": "KSBio"},
+        {"account_name": "Receivable Accounts", "account_type": "Receivable", "root_type": "Asset", "is_group": 1, "company": "KSBio"},
+        {"account_name": "Payable Accounts", "account_type": "Payable", "root_type": "Liability", "is_group": 1, "company": "KSBio"},
+        {"account_name": "Sales Accounts", "account_type": "Income", "root_type": "Income", "is_group": 1, "company": "KSBio"},
+        {"account_name": "Purchase Accounts", "account_type": "Expense", "root_type": "Expense", "is_group": 1, "company": "KSBio"},
+    ]
+    
+    print("\nCreating root accounts...")
+    for acc in root_accounts:
+        result = create_account(session, acc)
+        if result["success"]:
+            print(f"  Created root: {acc['account_name']}")
+        else:
+            print(f"  Error creating {acc['account_name']}: {result.get('error', '')[:80]}")
+        time.sleep(0.3)
+    
+    return root_accounts
+
+def determine_account_type(account_name, cl_amount, dr_amount, cr_amount):
+    """Determine account type based on name and amounts"""
+    name_upper = account_name.upper()
+    
+    # Check for Bank accounts
+    if 'BANK' in name_upper:
+        return ("Bank", "Asset", "Bank Accounts")
+    
+    # Check for Cash accounts
+    if 'CASH' in name_upper:
+        return ("Cash", "Asset", "Cash Accounts")
+    
+    # Check for Receivables (debtors, customers)
+    if any(x in name_upper for x in ['DEBTOR', 'CUSTOMER', 'RECEIVABLE', 'SALES LEDGER']):
+        return ("Receivable", "Asset", "Receivable Accounts")
+    
+    # Check for Payables (creditors, suppliers)
+    if any(x in name_upper for x in ['CREDITOR', 'SUPPLIER', 'PAYABLE', 'PURCHASE LEDGER']):
+        return ("Payable", "Liability", "Payable Accounts")
+    
+    # Check for Sales/Revenue
+    if any(x in name_upper for x in ['SALES', 'REVENUE', 'INCOME']):
+        return ("Income", "Income", "Sales Accounts")
+    
+    # Check for Purchase/Expense
+    if any(x in name_upper for x in ['PURCHASE', 'EXPENSE', 'DIRECT EXPENSE', 'INDIRECT EXPENSE']):
+        return ("Expense", "Expense", "Purchase Accounts")
+    
+    # Check for Duties & Taxes
+    if any(x in name_upper for x in ['TAX', 'DUTY', 'GST', 'TDS', 'CST', 'VAT']):
+        return ("Tax", "Liability", "Payable Accounts")
+    
+    # Check for Stock/Inventory
+    if any(x in name_upper for x in ['STOCK', 'INVENTORY', 'GOODS']):
+        return ("Stock", "Asset", "Receivable Accounts")
+    
+    # Check for Secured Loans
+    if any(x in name_upper for x in ['LOAN', 'BORROWING', 'DEPOSIT']):
+        return ("Bank", "Liability", "Payable Accounts")
+    
+    # Default to Cash
+    if abs(cl_amount) > 0 or abs(dr_amount) > 0 or abs(cr_amount) > 0:
+        return ("Cash", "Asset", "Cash Accounts")
+    else:
+        return ("Cash", "Asset", "Cash Accounts")
 
 def import_accounts(session, accounts, batch_size=10):
     """Import accounts into ERPNext"""
@@ -127,7 +178,27 @@ def import_accounts(session, accounts, batch_size=10):
     print(f"\nImporting {len(accounts)} accounts...")
     
     for i, account in enumerate(accounts):
-        result = create_account(session, account)
+        # Determine account type and parent
+        acc_type, root_type, parent = determine_account_type(
+            account['account_name'],
+            account['cl_amount'],
+            account['dr_amount'],
+            account['cr_amount']
+        )
+        
+        # Add company to make full account name
+        full_parent = f"{parent} - KSB" if parent else ""
+        
+        account_data = {
+            "account_name": account['account_name'],
+            "account_type": acc_type,
+            "root_type": root_type,
+            "is_group": 0,
+            "company": "KSBio",
+            "parent_account": full_parent
+        }
+        
+        result = create_account(session, account_data)
         if result["success"]:
             success += 1
         else:
@@ -156,6 +227,10 @@ if __name__ == "__main__":
     
     session = login()
     
+    # First create root accounts
+    create_root_accounts(session)
+    
+    # Now parse and import the accounts
     trial_balance_file = r"C:\Users\Digvijay Patil\Desktop\Tally 12-4-2026\Reports\Trial Balance\TrialBal Ledger Wise.xml"
     
     print("\nParsing Trial Balance XML...")
@@ -165,14 +240,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Error parsing: {e}")
         accounts = []
-    
-    print(f"\nAccount types breakdown:")
-    types = {}
-    for a in accounts:
-        t = a['account_type']
-        types[t] = types.get(t, 0) + 1
-    for t, c in types.items():
-        print(f"  {t}: {c}")
     
     # Import accounts
     acc_success, acc_failed = import_accounts(session, accounts)
